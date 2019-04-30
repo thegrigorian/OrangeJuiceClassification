@@ -1,0 +1,509 @@
+---
+title: "Homework assignment 1"
+author: "Anna Alexandra Grigoryan"
+date: "March 25, 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(data.table)
+library(magrittr)
+library(caret)
+library(rpart)
+library(rpart.plot)
+library(xgboost)
+library(ranger)
+library(gbm)
+library(ISLR)
+library(skimr)
+library(ROCR)
+library(e1071)
+library(pROC)
+library(corrplot)
+```
+
+## 1. Tree ensemble models
+
+OJ dataset from the ISLR package is used. This dataset records purchases of two types of orange juices and presents customer and product characteristics as features. 
+
+The goal is to predict which of the juices is chosen in a given purchase situation. 
+
+```{r load, echo=TRUE}
+data <- data.table(OJ)
+data <- data[!is.na(Purchase)]
+```
+
+a)  Make a training data of 75% and keep 25% of the data as a test set.  Plot the final model and interpret the result.
+
+
+
+```{r train test, echo=TRUE}
+training_ratio <- 0.75 
+set.seed(1234)
+train_indices <- createDataPartition(
+  y = data[["Purchase"]],
+  times = 1,
+  p = training_ratio,
+  list = FALSE
+)
+
+data_train <- data[train_indices, ]
+data_test <- data[-train_indices, ]
+```
+
+Train a decision tree as a benchmark model.
+
+Our benchmark decision tree model is as follows: 
+
+```{r simple tree, echo=TRUE}
+train_control <- trainControl(
+  method = "repeatedcv",
+  number = 5,
+  repeats = 3
+)
+
+
+set.seed(857)
+simple_tree_model <- train(Purchase ~ .,
+                      method = "rpart",
+                      data = data_train,
+                      tuneGrid = data.frame(cp = c(0.01, 0.02, 0.05)),
+                      trControl = train_control)
+simple_tree_model
+
+```
+
+Plot the final model and interpret the result.
+
+```{r tree plot, echo=TRUE}
+rpart.plot(simple_tree_model[["finalModel"]])
+```
+Node 1 includes all the rows of our dataset (no split yet), which has 39% CH and 61% MM. The first split separates our dataset according to the loyalty status. At the beginning we have a 39% of successes (assuming "CH" is a success). The first split creates a node with 17% and a node with 79% of successes. The model "thinks" this is a statistically significant split (based on the method it uses). Finally, the Yes or No we get on the top of our node is determined by which number is higher (number of No or Yes). The percentage we get in the bottom of the node is the percentage of rows/observations of our dataset.
+
+b. Investigate tree ensemble models: random forest, gradient boosting machine, XGBoost. Try various tuning parameter combinations and select the best model using cross-validation.
+
+```{r random forest, echo=TRUE}
+mtry <- sqrt(ncol(data))
+tune_grid <- expand.grid(
+  .mtry = c(2, 3, 5, 7, 9, 12),
+  .splitrule = "gini",
+  .min.node.size = c(5, 10)
+)
+
+set.seed(857)
+rf_model <- train(Purchase ~ .,
+                  method = "ranger",
+                  data = data_train,
+                  trControl = train_control,
+                  tuneGrid = tune_grid,
+                  num.trees = 100,
+                  importance = "impurity"
+                  )
+rf_model
+```
+
+```{r gradient boosting, echo=TRUE}
+
+gbm_grid <- expand.grid(n.trees = c(100, 500, 1000), 
+                        interaction.depth = c(2, 3, 5), 
+                        shrinkage = c(0.005, 0.01, 0.1),
+                        n.minobsinnode = c(5))
+set.seed(857)
+gbm_model <- train(Purchase ~ .,
+                   method = "gbm",
+                   data = data_train,
+                   trControl = train_control,
+                   tuneGrid = gbm_grid,
+                   verbose = FALSE # gbm by default prints too much output
+                   )
+gbm_model
+```
+```{r gradient boosting refined, echo=TRUE}
+gbm_grid <- expand.grid(
+  n.trees = c(500, 1000), 
+  interaction.depth = c(1, 2, 4), 
+  shrinkage = c(0.005),
+  n.minobsinnode = c(5)
+)
+
+set.seed(857)
+gbm_model <- train(Purchase ~ .,
+                   method = "gbm",
+                   data = data_train,
+                   trControl = train_control,
+                   tuneGrid = gbm_grid,
+                   verbose = FALSE # gbm by default prints too much output
+                   )
+gbm_model
+
+
+```
+
+```{r XGboost, echo=TRUE}
+xgb_grid <- expand.grid(nrounds = c(500, 1000),
+                       max_depth = c(2, 3, 4),
+                       eta = c(0.01, 0.05),
+                       gamma = 0,
+                       colsample_bytree = c(0.5, 0.7),
+                       min_child_weight = 1, # similar to n.minobsinnode
+                       subsample = c(0.5))
+set.seed(857)
+xgboost_model <- train(Purchase ~ .,
+                       method = "xgbTree",
+                       data = data_train,
+                       trControl = train_control,
+                       tuneGrid = xgb_grid)
+xgboost_model
+```
+
+c) Compare different models with the resamples function (make sure to set the same seed before model training for all 3 models).
+
+```{r}
+resamples_object <- resamples(list("rpart" = simple_tree_model,
+                                   "rf" = rf_model,
+                                   "gbm" = gbm_model,
+                                   "xgboost" = xgboost_model))
+summary(resamples_object)
+```
+d) Choose the best model and plot ROC curve for the best model on the test set. Calculate and interpret AUC.
+
+The best model selected is the XGBoost model, for which the ROC curve is drawn. 
+
+
+```{r}
+gbm.pred <- predict(xgboost_model,data_test)
+confusionMatrix(gbm.pred,data_test$Purchase)
+gbm.probs <- predict(xgboost_model,data_test,type="prob")
+gbm.ROC <- roc(predictor=gbm.probs$CH,
+               response=data_test$Purchase,
+               levels=rev(levels(data_test$Purchase)))
+plot(gbm.ROC)
+gbm.ROC$auc
+```
+Area under the curve is 0.9061. 
+
+```{r}
+plot(varImp(gbm_model))
+plot(varImp(xgboost_model))
+```
+
+# 2. Variable importance profiles (6 points)
+
+
+```{r}
+data <- data.table(Hitters)
+data <- data[!is.na(Salary)]
+data[, log_salary := log(Salary)]
+data[, Salary := NULL]
+```
+
+Train two random forest models: one with mtry = 2 and another with mtry = 10 (use the whole dataset and don’t use cross-validation). Inspect variable importance profiles. What do you see in terms of how important the first few variables are relative to each other?
+
+So, mtry being the number of predictors sampled for spliting at each node, influeneces the importance of variables too. The higher the mtry, the less is the importance of variables, the higher the bias and the less the variance. In contrast, the lower the mtry, the more complex the model, the higher the importance of single variables, the higher the variance, the less the bias. 
+
+```{r}
+tune_grid <- expand.grid(
+  .mtry = 2,
+  .splitrule = "gini",
+  .min.node.size = 5
+)
+
+set.seed(857)
+rf_model_2 <- train(Purchase ~ .,
+                  method = "ranger",
+                  data = data_train,
+                  trControl = train_control,
+                  tuneGrid = tune_grid,
+                  num.trees = 100,
+                  importance = "impurity"
+                  )
+
+tune_grid <- expand.grid(
+  .mtry = 10,
+  .splitrule = "gini",
+  .min.node.size = 5
+)
+
+set.seed(857)
+rf_model_10 <- train(Purchase ~ .,
+                  method = "ranger",
+                  data = data_train,
+                  trControl = train_control,
+                  tuneGrid = tune_grid,
+                  num.trees = 100,
+                  importance = "impurity"
+                  )
+
+
+plot(varImp(rf_model_2))
+plot(varImp(rf_model_10))
+
+```
+
+
+
+
+In the same vein, estimate two gbm models and set bag.fraction to 0.1 first and to 0.9 in the second. The tuneGrid should consist of the same values for the two models (a dataframe with one row): n.trees = 500, interaction.depth = 5, shrinkage = 0.1, n.minobsinnode = 5. Compare variable importance plots for the two models. What is the meaning of bag.fraction? Based on this, why is one variable importance profile more extreme than the other?
+
+
+Bag fraction is a positive value not greater than one, which specifies the ratio of the data to be used at each iteration. For example, bag = 0.1 corresponds to sampling and using only 10% of the data at each iteration.
+
+```{r}
+
+gbm_grid <- expand.grid(n.trees = 500, 
+                        interaction.depth = 5, 
+                        shrinkage = 0.1,
+                        n.minobsinnode = c(5))
+set.seed(857)
+gbm_model_01 <- train(Purchase ~ .,
+                   method = "gbm",
+                   data = data_train,
+                   trControl = train_control,
+                   tuneGrid = gbm_grid,
+                   bag.fraction = 0.1, 
+                   verbose = FALSE # gbm by default prints too much output
+                   )
+
+set.seed(857)
+gbm_model_09 <- train(Purchase ~ .,
+                   method = "gbm",
+                   data = data_train,
+                   trControl = train_control,
+                   tuneGrid = gbm_grid,
+                   bag.fraction = 0.9, 
+                   verbose = FALSE # gbm by default prints too much output
+                   )
+plot(varImp(gbm_model_01))
+plot(varImp(gbm_model_09))
+```
+
+Where the bag.fraction is small, the higher is the importance of single variables, and vice versa. 
+
+
+
+```{r}
+data <- fread("/Users/user/Desktop/DS3/KaggleV2-May-2016.csv")
+
+# some data cleaning
+data[, c("PatientId", "AppointmentID", "Neighbourhood") := NULL]
+setnames(data, 
+         c("No-show", 
+           "Age", 
+           "Gender",
+           "ScheduledDay", 
+           "AppointmentDay",
+           "Scholarship",
+           "Hipertension",
+           "Diabetes",
+           "Alcoholism",
+           "Handcap",
+           "SMS_received"), 
+         c("no_show", 
+           "age", 
+           "gender", 
+           "scheduled_day", 
+           "appointment_day",
+           "scholarship",
+           "hypertension",
+           "diabetes",
+           "alcoholism",
+           "handicap",
+           "sms_received"))
+
+# for binary prediction, the target variable must be a factor
+data[, no_show := factor(no_show, levels = c("Yes", "No"))]
+data[, handicap := ifelse(handicap > 0, 1, 0)]
+
+# create new variables
+data[, gender := factor(gender)]
+data[, scholarship := factor(scholarship)]
+data[, hypertension := factor(hypertension)]
+data[, alcoholism := factor(alcoholism)]
+data[, handicap := factor(handicap)]
+
+data[, scheduled_day := as.Date(scheduled_day)]
+data[, appointment_day := as.Date(appointment_day)]
+data[, days_since_scheduled := as.integer(appointment_day - scheduled_day)]
+
+# clean up a little bit
+data <- data[age %between% c(0, 95)]
+data <- data[days_since_scheduled > -1]
+data[, c("scheduled_day", "appointment_day", "sms_received") := NULL]
+```
+
+```{r}
+library(h2o)
+h2o.init()
+data <- as.h2o(data)
+```
+Create train / validation / test sets, cutting the data into 5% - 45% - 50% parts.
+
+
+
+
+```{r}
+splitted_data <- h2o.splitFrame(data, 
+                                ratios = c(0.05, 0.45), 
+                                seed = 123)
+data_train <- splitted_data[[1]]
+data_valid <- splitted_data[[2]]
+data_test <- splitted_data[[3]]
+```
+
+Train a benchmark model of your choice using h2o (such as random forest, gbm or glm) and evaluate it on the validation set.
+
+```{r}
+y <- "no_show"
+X <- setdiff(names(data_train), y)
+glm_model <- h2o.glm(
+  X, y,
+  training_frame = data_train,
+  family = "binomial",
+  alpha = 1, 
+  lambda_search = TRUE,
+  seed = 123,
+  nfolds = 5, 
+  keep_cross_validation_predictions = TRUE  # this is necessary to perform later stacking
+)
+
+print(h2o.auc(h2o.performance(glm_model, newdata = data_valid)))
+```
+
+Build at least 4 models of different families using cross validation, keeping cross validated predictions. One of the model families must be deeplearning (you can try, for example, different network topologies).
+
+Evaluate validation set performance of each model.
+
+
+```{r}
+glm_model <- h2o.glm(
+  X, y,
+  training_frame = data_train,
+  validation_frame = data_valid,
+  family = "binomial",
+  alpha = 1, 
+  lambda_search = TRUE,
+  seed = 123,
+  nfolds = 5, 
+  keep_cross_validation_predictions = TRUE  # this is necessary to perform later stacking
+)
+
+
+gbm_model <- h2o.gbm(
+  X, y,
+  training_frame = data_train,
+  validation_frame = data_valid,
+  ntrees = 200, 
+  max_depth = 10, 
+  learn_rate = 0.1, 
+  seed = 123,
+  nfolds = 5, 
+  keep_cross_validation_predictions = TRUE
+)
+
+
+
+rf_model <- h2o.randomForest(
+  X, y,
+  training_frame = data_train,
+  validation_frame = data_valid,
+  ntrees = 200, 
+  max_depth = 10, 
+  seed = 123,
+  nfolds = 5,
+  keep_cross_validation_predictions = TRUE
+)
+
+
+deeplearning_model <- h2o.deeplearning(
+  X, y,
+  training_frame = data_train,
+  validation_frame = data_valid,
+  hidden = c(32, 8),
+  seed = 123,
+  nfolds = 5, 
+  keep_cross_validation_predictions = TRUE
+)
+
+print(h2o.auc(h2o.performance(glm_model, newdata = data_valid)))
+print(h2o.auc(h2o.performance(gbm_model, newdata = data_valid)))
+print(h2o.auc(h2o.performance(rf_model, newdata = data_valid)))
+print(h2o.auc(h2o.performance(deeplearning_model, newdata = data_valid)))
+
+glm.pred=as.data.table(predict(glm_model, newdata=data_valid))$No
+gbm.pred=as.data.table(predict(gbm_model, newdata=data_valid))$No
+rf.pred=as.data.table(predict(rf_model, newdata=data_valid))$No
+dl.pred=as.data.table(predict(deeplearning_model, newdata=data_valid))$No
+
+results <- data.frame(glm.pred,gbm.pred, rf.pred, dl.pred)
+cor(results, method="pearson")
+
+```
+
+How large are the correlations of predicted scores of the validation set produced by the base learners?
+
+The highest is the correlation od random forest and GB predicted setses. Also, deep learning and random forest are significantly correlated. 
+
+Create a stacked ensemble model from the base learners. Experiment with at least two different ensembling meta learners.
+
+```{r}
+ensemble_model_gbm <- h2o.stackedEnsemble(
+  X, y,
+  training_frame = data_train,
+  metalearner_algorithm = "gbm",
+  base_models = list(glm_model, 
+                     gbm_model,
+                     deeplearning_model))
+print(h2o.auc(h2o.performance(ensemble_model_gbm, newdata = data_valid)))
+
+
+learn_rate_opt <- c(0.1, 0.3)
+max_depth_opt <- c(3, 5, 7)
+hyper_params <- list(learn_rate = learn_rate_opt,
+                     max_depth = max_depth_opt)
+
+gbm_grid <- h2o.grid(
+  x = X, y = y,
+  training_frame = data_train,
+  algorithm = "gbm",
+  ntrees = 10,
+  hyper_params = hyper_params,
+  seed = 123,
+  nfolds = 5, 
+  keep_cross_validation_predictions = TRUE)
+
+ensemble_model_grid_gbm <- h2o.stackedEnsemble(
+  X, y,
+  training_frame = data_train,
+  base_models = gbm_grid@model_ids)
+
+# individual test set performances
+for (model_id in gbm_grid@model_ids) {
+  model <- h2o.getModel(model_id)
+  print(model_id)
+  print(h2o.auc(h2o.performance(model, newdata = data_valid)))
+}
+```
+
+
+Evaluate ensembles on validation set. Did it improve prediction?
+
+As a result of ensemble learning accurancy score of 0.71 has been achieved. 
+
+
+
+Evaluate the best performing model on the test set. How does performance compare to that of the validation set?
+
+The best selected model is the last ensemble learning model. The results on test are as follows:
+```{r}
+for (model_id in gbm_grid@model_ids) {
+  model <- h2o.getModel(model_id)
+  print(model_id)
+  print(h2o.auc(h2o.performance(model, newdata = data_test)))
+}
+
+
+```
+
+
+As we can observe, the difference between the validation and test set prediction accurancys is not significant. Thus the model proves to be a strong one. 
